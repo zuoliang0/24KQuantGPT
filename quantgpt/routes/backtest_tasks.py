@@ -385,8 +385,9 @@ def _run_backtest_task(task_id: str, req: AutoBacktestRequest, user_id: str):
                 logger.error(f"[{task_id}] DB persist error: {e}")
 
 
-@router.get("/api/v1/health")
+@router.get("/api/v1/health", summary="健康检查")
 def health():
+    """检查服务状态，返回当前活跃任务数和总任务数。不需要认证。"""
     from ..auth import is_auth_disabled
     return {
         "status": "ok",
@@ -396,7 +397,7 @@ def health():
     }
 
 
-@router.post("/api/v1/tasks/{task_id}/cancel")
+@router.post("/api/v1/tasks/{task_id}/cancel", summary="取消回测任务")
 async def cancel_task(
     task_id: str,
     user: User | None = Depends(get_optional_user),
@@ -420,12 +421,13 @@ async def cancel_task(
     return {"task_id": task_id, "status": "cancelled"}
 
 
-@router.post("/api/v1/auto_backtest", status_code=202)
+@router.post("/api/v1/auto_backtest", status_code=202, summary="提交因子回测任务")
 async def auto_backtest(
     req: AutoBacktestRequest,
     request: Request,
     user: User | None = Depends(get_optional_user),
 ):
+    """提交异步回测任务。支持自然语言 prompt 或直接因子表达式。返回 task_id，用 GET /api/v1/tasks/{task_id} 轮询结果。"""
     client_ip = request.client.host if request.client else "unknown"
 
     if not check_rate_limit(client_ip):
@@ -466,7 +468,7 @@ async def auto_backtest(
     return {"task_id": task_id, "status": "pending"}
 
 
-@router.get("/api/v1/tasks/stats")
+@router.get("/api/v1/tasks/stats", summary="任务统计")
 async def task_stats(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -509,7 +511,7 @@ async def task_stats(
     }
 
 
-@router.get("/api/v1/tasks")
+@router.get("/api/v1/tasks", summary="查询任务列表")
 async def list_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -605,12 +607,13 @@ async def list_tasks(
     return {"tasks": [sanitize_task_response(t) for t in merged], "page": page, "page_size": page_size, "total": total}
 
 
-@router.get("/api/v1/tasks/{task_id}")
+@router.get("/api/v1/tasks/{task_id}", summary="查询任务状态和结果")
 async def get_task(
     task_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """返回任务当前状态。status=completed 时 result 字段包含回测指标（Sharpe、IC、Fitness 等）。回测是异步的，提交后需轮询此端点直到 status 变为 completed 或 failed。"""
     user_id = str(user.id)
 
     task = tasks.get(task_id)

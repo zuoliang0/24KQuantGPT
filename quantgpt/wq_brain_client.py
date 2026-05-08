@@ -83,29 +83,33 @@ class WQBrainClient:
             self._session.close()
             self._session = None
 
-    def authenticate(self) -> bool:
+    def authenticate(self, _max_retries: int = 5) -> bool:
         s = self._get_session()
-        r = s.post(
-            f"{API_BASE}/authentication",
-            auth=(self.email, self.password),
-        )
-        if r.status_code == 429:
-            retry = int(r.headers.get("Retry-After", "60"))
-            logger.info(f"WQ auth rate-limited, waiting {retry}s")
-            time.sleep(retry + 1)
-            return self.authenticate()
+        for attempt in range(_max_retries):
+            r = s.post(
+                f"{API_BASE}/authentication",
+                auth=(self.email, self.password),
+            )
+            if r.status_code == 429:
+                retry = int(r.headers.get("Retry-After", "60"))
+                logger.info(f"WQ auth rate-limited, waiting {retry}s (attempt {attempt + 1}/{_max_retries})")
+                time.sleep(retry + 1)
+                continue
 
-        if r.status_code not in (200, 201):
-            logger.error(f"WQ auth failed: HTTP {r.status_code}")
-            return False
+            if r.status_code not in (200, 201):
+                logger.error(f"WQ auth failed: HTTP {r.status_code}")
+                return False
 
-        data = r.json()
-        if "inquiry" in data:
-            logger.error("WQ auth requires biometric verification — log in via browser first")
-            return False
+            data = r.json()
+            if "inquiry" in data:
+                logger.error("WQ auth requires biometric verification — log in via browser first")
+                return False
 
-        logger.info("WQ BRAIN authenticated")
-        return True
+            logger.info("WQ BRAIN authenticated")
+            return True
+
+        logger.error(f"WQ auth failed: rate-limited {_max_retries} times")
+        return False
 
     def get_user_info(self) -> dict:
         r = self._get_session().get(f"{API_BASE}/users/self")

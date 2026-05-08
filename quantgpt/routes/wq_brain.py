@@ -102,7 +102,7 @@ def _run_wq_brain_task(task_id: str, req: WQBrainSubmitRequest, user_id: str):
             logger.error(f"[{task_id}] DB persist error: {e}")
 
 
-@router.get("/status")
+@router.get("/status", summary="WQ BRAIN 配置状态")
 async def wq_brain_status():
     accounts = configured_accounts()
     return {
@@ -144,12 +144,13 @@ async def list_platform_alphas(
     return {"total": result["total"], "alphas": result["alphas"]}
 
 
-@router.post("/submit", status_code=202)
+@router.post("/submit", status_code=202, summary="提交因子到 WQ BRAIN 模拟")
 async def wq_brain_submit(
     req: WQBrainSubmitRequest,
     request: Request,
     user: User = Depends(get_current_user),
 ):
+    """提交因子表达式到 WorldQuant BRAIN 平台进行模拟。异步执行，返回 task_id。模拟通常需要 2-5 分钟，用 GET /api/v1/tasks/{task_id} 轮询结果。结果包含 Sharpe、Fitness、Turnover 等 IS 指标。"""
     if not is_configured(req.account):
         raise HTTPException(status_code=503, detail=f"WQ BRAIN 未配置 (account={req.account}) — 请设置对应的环境变量")
 
@@ -183,7 +184,7 @@ async def wq_brain_submit(
     return {"task_id": task_id, "status": "pending"}
 
 
-@router.get("/submitted-alphas")
+@router.get("/submitted-alphas", summary="查询已提交因子列表")
 async def list_submitted_alphas(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),

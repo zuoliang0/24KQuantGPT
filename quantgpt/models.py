@@ -190,3 +190,18 @@ class DailySummary(Base):
     __table_args__ = (
         Index("ix_daily_summaries_date_market", "date", "market", unique=True),
     )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    key_hash = Column(String(255), nullable=False, unique=True)
+    prefix = Column(String(10), nullable=False)
+    name = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    user = relationship("User")

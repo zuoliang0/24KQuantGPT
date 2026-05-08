@@ -211,7 +211,7 @@ def _run_batch_task(task_id: str, req: WQBrainBatchRequest, user_id: str):
             logger.error(f"[{task_id}] DB persist error: {e}")
 
 
-@router.post("/batch-submit", status_code=202)
+@router.post("/batch-submit", status_code=202, summary="批量提交因子到 WQ BRAIN")
 async def wq_brain_batch_submit(
     req: WQBrainBatchRequest,
     request: Request,
@@ -331,7 +331,7 @@ def _run_batch_submit_by_id(task_id: str, alpha_ids: list[str], account: str, us
             logger.error(f"[{task_id}] DB persist error: {e}")
 
 
-@router.post("/batch-submit-by-id", status_code=202)
+@router.post("/batch-submit-by-id", status_code=202, summary="批量提交已模拟因子")
 async def wq_brain_batch_submit_by_id(
     req: BatchSubmitByIdRequest,
     request: Request,
@@ -378,7 +378,7 @@ async def wq_brain_batch_submit_by_id(
 # ---- Batch alpha status check (synchronous) ----
 
 
-@router.post("/batch-alpha-status")
+@router.post("/batch-alpha-status", summary="批量查询因子平台状态")
 async def wq_brain_batch_alpha_status(
     req: BatchAlphaStatusRequest,
     user: User = Depends(get_current_user),
@@ -403,7 +403,7 @@ async def wq_brain_batch_alpha_status(
 # ---- Batch finalize (query real SC results for previously submitted alphas) ----
 
 
-@router.post("/batch-finalize")
+@router.post("/batch-finalize", summary="批量查询 SC 检查最终结果")
 async def wq_brain_batch_finalize(
     req: BatchFinalizeRequest,
     user: User = Depends(get_current_user),
