@@ -77,6 +77,13 @@ cd frontend && npm run build
 - 文档改动不需要新增测试，但要检查命令、路径和链接是否与仓库真实结构一致。
 - 不要为了覆盖率新增脆弱单元测试；确实需要测试时，优先选择能验证真实行为的集成、端到端或 smoke 测试。
 
+## 因子挖掘记录
+
+- 后续进行因子挖掘、批量候选验证或收益曲线生成时，最终结果必须写入因子看板数据库，不能只保存在 `tmp/`、`reports/` 或终端输出里。
+- 看板数据至少要落到 `factor_mining_runs`、`factor_mining_candidates` 和 `factor_mining_backtest_series` 对应数据结构，优先复用 `quantgpt/factor_mining_store.py` 里的持久化函数。
+- 如果因 MCP 超时或外部数据慢而改用本地脚本探索，`tmp/` 只能作为中间产物目录；完成后必须补写数据库，并通过 `/api/v1/factor-mining/runs` 和 `/api/v1/factor-mining/runs/{run_id}/backtest-series` 验证前端可见。
+- 写入记录时要保存股票池、基准、验证窗口、候选表达式、评分指标和收益曲线，方便后续在因子看板中比较和复盘。
+
 ## 临时文件
 
 - 临时代码、截图、探索数据只允许放在项目根目录的 `tmp/` 下。

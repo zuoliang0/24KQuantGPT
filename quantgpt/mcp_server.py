@@ -15,8 +15,8 @@ import asyncio
 import json
 import logging
 import sys
-import time
 import traceback
+from typing import Any
 
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
@@ -24,32 +24,74 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .expression_parser import __doc__ as _expr_module_doc
 from .expression_parser import parse_expression
+from .factor_mining_service import (
+    append_factor_mining_candidates_sync,
+    get_factor_mining_run_snapshot,
+    list_factor_mining_run_snapshots,
+    refresh_factor_mining_candidate_sync,
+    run_factor_mining_batch_sync,
+    run_factor_mining_job,
+    submit_append_factor_mining_candidates_async,
+    submit_factor_mining_batch_async,
+    submit_refresh_factor_mining_candidate_async,
+    validate_factor_mining_batch_request,
+)
 from .fundamental_data import ALL_FUNDAMENTAL_NAMES
 from .market_data import BENCHMARK_CODES, UNIVERSES, MarketDataFetcher, fetch_benchmark_returns, get_universe
 from .mcp_task_helper import complete_mcp_task, start_mcp_task
 from .report import generate_report
+from .task_executor import _run_backtest_in_process, get_executor
 from .wq_brain_service import (
     run_batch_simulation,
     run_check_alphas,
     run_list_alphas,
     run_single_simulation,
     run_submit_by_ids,
-    safe_float,
 )
-from .task_executor import _run_backtest_in_process, get_executor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "quantgpt",
-    instructions="QuantGPT — A 股因子回测服务。先用 list_operators 了解可用算子，再用 run_backtest 执行回测。可用 score_factor 评分、diagnose_factor 诊断、run_anti_overfit 检测过拟合、run_rolling_validation 滚动验证。",
+    instructions="QuantGPT — A 股因子回测服务。先用 list_operators 了解可用算子，再用 run_backtest 执行回测。可用 run_factor_mining_batch 写入因子看板数据库，score_factor 评分、diagnose_factor 诊断、run_anti_overfit 检测过拟合、run_rolling_validation 滚动验证。",
     streamable_http_path="/",
     stateless_http=True,
     transport_security=TransportSecuritySettings(
         allowed_hosts=["localhost", "localhost:8003", "127.0.0.1", "127.0.0.1:8003"],
     ),
 )
+
+_factor_mining_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _json_tool_response(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+
+
+def _normalize_execution_mode(execution_mode: str) -> str:
+    mode = str(execution_mode or "async").strip().lower()
+    if mode not in {"async", "sync"}:
+        raise ValueError(f"execution_mode 必须是 async 或 sync：{execution_mode}")
+    return mode
+
+
+def _track_factor_mining_job(job: dict[str, Any]) -> None:
+    async def _runner() -> None:
+        result = await asyncio.to_thread(run_factor_mining_job, job)
+        if result.get("status") == "failed":
+            logger.error("Factor mining background job failed", extra={"run_id": job.get("run_id")})
+
+    def _done(task: asyncio.Task[None]) -> None:
+        _factor_mining_background_tasks.discard(task)
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Factor mining background task crashed")
+
+    task = asyncio.create_task(_runner())
+    _factor_mining_background_tasks.add(task)
+    task.add_done_callback(_done)
 
 
 def _enrich_with_fundamentals(expression: str, market_df, stock_codes: list, start_date: str, end_date: str):
@@ -104,6 +146,128 @@ def list_universes() -> str:
         "universes": a_share_info,
         "benchmarks": a_share_benchmarks,
     }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def validate_factor_mining_batch(
+    universe: str,
+    benchmark: str,
+    latest_window: dict[str, Any],
+    history_window: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> str:
+    """校验因子挖掘批次参数和候选表达式，不写入数据库。"""
+    try:
+        result = validate_factor_mining_batch_request(
+            universe=universe,
+            benchmark=benchmark,
+            latest_window=latest_window,
+            history_window=history_window,
+            candidates=candidates,
+        )
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
+
+
+@mcp.tool()
+async def run_factor_mining_batch(
+    source_tag: str,
+    source_summary: str,
+    universe: str,
+    benchmark: str,
+    latest_window: dict[str, Any],
+    history_window: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    execution_mode: str = "async",
+) -> str:
+    """创建因子挖掘批次，执行 latest/history 双窗口回测，并写入因子看板数据库。"""
+    try:
+        mode = _normalize_execution_mode(execution_mode)
+        if mode == "sync":
+            result = await asyncio.to_thread(
+                run_factor_mining_batch_sync,
+                source_tag,
+                source_summary,
+                universe,
+                benchmark,
+                latest_window,
+                history_window,
+                candidates,
+            )
+        else:
+            result, job = await asyncio.to_thread(
+                submit_factor_mining_batch_async,
+                source_tag,
+                source_summary,
+                universe,
+                benchmark,
+                latest_window,
+                history_window,
+                candidates,
+            )
+            _track_factor_mining_job(job)
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
+
+
+@mcp.tool()
+async def get_factor_mining_run(run_id: str) -> str:
+    """查询因子挖掘批次状态、候选排序、错误和看板 API 路径。"""
+    try:
+        result = await asyncio.to_thread(get_factor_mining_run_snapshot, run_id)
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
+
+
+@mcp.tool()
+async def append_factor_mining_candidates(
+    run_id: str,
+    candidates: list[dict[str, Any]],
+    execution_mode: str = "async",
+) -> str:
+    """向已有因子挖掘批次追加或更新候选，不删除其他候选和收益曲线。"""
+    try:
+        mode = _normalize_execution_mode(execution_mode)
+        if mode == "sync":
+            result = await asyncio.to_thread(append_factor_mining_candidates_sync, run_id, candidates)
+        else:
+            result, job = await asyncio.to_thread(submit_append_factor_mining_candidates_async, run_id, candidates)
+            _track_factor_mining_job(job)
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
+
+
+@mcp.tool()
+async def refresh_factor_mining_candidate(
+    run_id: str,
+    row_key: str,
+    execution_mode: str = "async",
+) -> str:
+    """按 run_id 和 row_key 重算单个候选的双窗口指标和 latest 收益曲线。"""
+    try:
+        mode = _normalize_execution_mode(execution_mode)
+        if mode == "sync":
+            result = await asyncio.to_thread(refresh_factor_mining_candidate_sync, run_id, row_key)
+        else:
+            result, job = await asyncio.to_thread(submit_refresh_factor_mining_candidate_async, run_id, row_key)
+            _track_factor_mining_job(job)
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
+
+
+@mcp.tool()
+async def list_factor_mining_runs(limit: int = 20) -> str:
+    """列出最近的因子挖掘批次，方便继续分析或刷新。"""
+    try:
+        result = await asyncio.to_thread(list_factor_mining_run_snapshots, limit)
+        return _json_tool_response(result)
+    except Exception as error:
+        return _json_tool_response({"status": "error", "error": f"{type(error).__name__}: {error}"})
 
 
 @mcp.tool()
@@ -574,7 +738,8 @@ async def wq_brain_submit(
     Returns:
         JSON with IS/OOS metrics, alpha_id, checks, submittable status.
     """
-    from .wq_brain_client import get_client, is_configured as _wq_configured
+    from .wq_brain_client import get_client
+    from .wq_brain_client import is_configured as _wq_configured
 
     task_id = await start_mcp_task("wq_brain_submit", expression, {
         "expression": expression, "tag": tag, "region": region, "universe": universe,
@@ -645,7 +810,8 @@ async def wq_brain_batch_submit(
     Returns:
         JSON with per-combination results, best_fitness, submittable_count.
     """
-    from .wq_brain_client import get_client, is_configured as _wq_configured
+    from .wq_brain_client import get_client
+    from .wq_brain_client import is_configured as _wq_configured
 
     regions = regions or ["USA"]
     delays = delays or [1]
@@ -710,7 +876,8 @@ async def wq_brain_submit_by_ids(
     Returns:
         JSON with per-alpha result (ACTIVE/SC_FAIL/TIMEOUT) and summary.
     """
-    from .wq_brain_client import get_client, is_configured as _wq_configured
+    from .wq_brain_client import get_client
+    from .wq_brain_client import is_configured as _wq_configured
 
     if account != "primary":
         return json.dumps({"error": "Alpha 提交仅允许 primary 账号"})
@@ -767,7 +934,8 @@ async def wq_brain_list_alphas(
     Returns:
         JSON with alpha list, each containing alpha_id, expression, metrics.
     """
-    from .wq_brain_client import get_client, is_configured as _wq_configured
+    from .wq_brain_client import get_client
+    from .wq_brain_client import is_configured as _wq_configured
 
     if not _wq_configured(account):
         return json.dumps({"error": f"WQ BRAIN 未配置 (account={account})"})
@@ -806,7 +974,8 @@ async def wq_brain_check_alphas(
     Returns:
         JSON with summary and per-alpha status.
     """
-    from .wq_brain_client import get_client, is_configured as _wq_configured
+    from .wq_brain_client import get_client
+    from .wq_brain_client import is_configured as _wq_configured
 
     if not _wq_configured(account):
         return json.dumps({"error": f"WQ BRAIN 未配置 (account={account})"})
@@ -847,8 +1016,9 @@ async def wq_brain_finalize_submissions(
     _error_msg = None
     _result = None
     try:
-        from .wq_brain_client import get_client, is_configured as _wq_configured
         from .routes.wq_brain_batch import _finalize_alpha_statuses
+        from .wq_brain_client import get_client
+        from .wq_brain_client import is_configured as _wq_configured
 
         if not _wq_configured(account):
             return json.dumps({"error": f"WQ BRAIN 未配置 (account={account})"})

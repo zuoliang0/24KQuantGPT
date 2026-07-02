@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from sqlalchemy import delete, select
+
 from .db import _get_session_factory, close_db, reset_db_state
 from .models import FactorMiningBacktestSeries, FactorMiningCandidate, FactorMiningRun
 
@@ -311,6 +312,58 @@ def save_mining_candidates(
     ))
 
 
+async def upsert_mining_candidates_async(
+    run_id: str,
+    candidates: Sequence[Mapping[str, Any]],
+    source_summary: str | None,
+    status: str,
+) -> list[str]:
+    run_uuid = _to_uuid(run_id)
+    normalized = _normalize_candidates(candidates)
+    row_keys = [row_key for row_key, _ in normalized]
+
+    async with _get_session_factory()() as session:
+        run = await session.get(FactorMiningRun, run_uuid)
+        if run is None:
+            raise ValueError(f"运行不存在：{run_id}")
+        if source_summary is not None:
+            run.source_summary = source_summary
+        if row_keys:
+            await session.execute(
+                delete(FactorMiningBacktestSeries)
+                .where(FactorMiningBacktestSeries.run_id == run_uuid)
+                .where(FactorMiningBacktestSeries.row_key.in_(row_keys))
+            )
+            await session.execute(
+                delete(FactorMiningCandidate)
+                .where(FactorMiningCandidate.run_id == run_uuid)
+                .where(FactorMiningCandidate.row_key.in_(row_keys))
+            )
+        for row_key, candidate in normalized:
+            candidate.run_id = run_uuid
+            candidate.id = None
+            candidate.row_key = row_key
+            session.add(candidate)
+        run.status = status
+        run.updated_at = _utcnow()
+        await session.commit()
+        return row_keys
+
+
+def upsert_mining_candidates(
+    run_id: str,
+    candidates: Sequence[Mapping[str, Any]],
+    source_summary: str | None,
+    status: str,
+) -> list[str]:
+    return _run_sync_db(lambda: upsert_mining_candidates_async(
+        run_id=run_id,
+        candidates=candidates,
+        source_summary=source_summary,
+        status=status,
+    ))
+
+
 def _to_backtest_payload(payload: Mapping[str, Any], row_key: str) -> FactorMiningBacktestSeries:
     return FactorMiningBacktestSeries(
         row_key=row_key,
@@ -407,10 +460,10 @@ async def save_backtest_series_rows_async(
     run_id: str,
     items: Mapping[str, Mapping[str, Any]],
     errors: Sequence[Mapping[str, Any]] | None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     run_uuid = _to_uuid(run_id)
     normalized_errors = list(errors or [])
-    target_row_keys = [str(row_key) for row_key in items.keys()]
+    target_row_keys = [str(row_key) for row_key in items]
 
     async with _get_session_factory()() as session:
         run = await session.get(FactorMiningRun, run_uuid)
@@ -499,7 +552,18 @@ async def save_backtest_series_rows_async(
                 "message": str(item.get("message") or "回测未成功"),
             })
 
-        if merged_errors:
+        status_rows = await session.execute(
+            select(FactorMiningBacktestSeries.status)
+            .where(FactorMiningBacktestSeries.run_id == run_uuid)
+        )
+        status_values = [str(status) for status in status_rows.scalars().all()]
+        total_success_count = len([status for status in status_values if status == "success"])
+        total_fail_count = len(status_values) - total_success_count
+
+        if merged_errors and total_success_count == 0:
+            run.status = "failed"
+            run.error_message = "\n".join(item["message"] for item in merged_errors if item["message"])
+        elif merged_errors or total_fail_count > 0:
             run.status = "partial_failed"
             run.error_message = "\n".join(item["message"] for item in merged_errors if item["message"])
         else:
@@ -512,6 +576,9 @@ async def save_backtest_series_rows_async(
             "success_count": success_count,
             "fail_count": fail_count,
             "error_count": len(merged_errors),
+            "status": run.status,
+            "total_success_count": total_success_count,
+            "total_fail_count": total_fail_count,
         }
 
 
@@ -527,7 +594,7 @@ def save_backtest_series_rows(
     run_id: str,
     items: Mapping[str, Mapping[str, Any]],
     errors: Sequence[Mapping[str, Any]] | None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return _run_sync_db(lambda: save_backtest_series_rows_async(run_id=run_id, items=items, errors=errors))
 
 

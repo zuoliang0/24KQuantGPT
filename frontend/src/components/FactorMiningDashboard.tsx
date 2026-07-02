@@ -96,6 +96,14 @@ interface BacktestSeriesDefinition {
   lineType: "solid" | "dashed";
 }
 
+interface FactorMiningWindowConfig {
+  id?: string;
+  label?: string;
+  warmup_start?: string;
+  validation_start?: string;
+  validation_end?: string;
+}
+
 const GRADE_RANK: Record<FactorGrade, number> = { A: 4, B: 3, C: 2, D: 1 };
 const GRADE_COLORS: Record<FactorGrade, string> = {
   A: "#2563eb",
@@ -231,15 +239,66 @@ function runLabel(run: FactorMiningRun): string {
   return `${universe} · ${count} · ${time}`;
 }
 
-function buildAskGptPrompt(row: FactorMiningCandidate): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function textValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function formatWindowConfig(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const window = value as FactorMiningWindowConfig;
+  const label = textValue(window.label) ?? textValue(window.id) ?? "未命名窗口";
+  const validationStart = textValue(window.validation_start);
+  const validationEnd = textValue(window.validation_end);
+  const warmupStart = textValue(window.warmup_start);
+  const validationRange = validationStart && validationEnd ? `${validationStart} 至 ${validationEnd}` : "未提供";
+  const warmupText = warmupStart ? `，预热从 ${warmupStart} 开始` : "";
+  return `${label}：评分区间 ${validationRange}${warmupText}`;
+}
+
+function runWindowLines(run: FactorMiningRun | null): string[] {
+  if (!run || !isRecord(run.params)) return [];
+  const windows = run.params.windows;
+  if (Array.isArray(windows)) {
+    return windows.map(formatWindowConfig).filter((item): item is string => item !== null);
+  }
+  const legacySummary = run.params.legacy_summary;
+  if (!isRecord(legacySummary)) return [];
+  const lines: string[] = [];
+  const latestWindow = textValue(legacySummary.latest_window);
+  const historyWindow = textValue(legacySummary.history_window);
+  if (latestWindow) lines.push(`最新评分窗口：${latestWindow}`);
+  if (historyWindow) lines.push(`历史评分窗口：${historyWindow}`);
+  return lines;
+}
+
+function buildAskGptPrompt(row: FactorMiningCandidate, run: FactorMiningRun | null): string {
+  const windowLines = runWindowLines(run);
   return [
     "请用中文解释这个A股量化因子的设计思路。",
     "",
+    "评分上下文：",
+    `股票池：${run?.universe ?? "未知"}`,
+    `基准：${run?.benchmark ?? "未知"}`,
+    `数据批次：${run?.source_tag ?? "未知"}`,
+    `批次说明：${run?.source_summary ?? "-"}`,
+    `生成时间：${run?.generated_at ? fmtDate(run.generated_at) : "-"}`,
+    windowLines.length > 0 ? "评分时间段：" : "评分时间段：-",
+    ...windowLines.map((line) => `- ${line}`),
+    "",
+    "因子信息：",
     `因子名称：${row.name || "-"}`,
     `因子表达式：${row.expression || "-"}`,
     `持仓周期：${row.holding_period} 个交易日`,
     `综合评分 Score：${fmtNumber(row.score, 1)}`,
     `等级：${row.grade || "-"}`,
+    `最新窗口评分：${fmtNumber(row.latest_score, 1)}`,
+    `历史窗口评分：${fmtNumber(row.history_score, 1)}`,
     `IC：${fmtNumber(row.latest.ic_mean, 4)}`,
     `ICIR：${fmtNumber(row.latest.ic_ir, 3)}`,
     `IC 胜率：${fmtPercent(row.latest.ic_win_rate, 1)}`,
@@ -254,8 +313,8 @@ function buildAskGptPrompt(row: FactorMiningCandidate): string {
     "请按下面结构回答：",
     "1. 这个因子想捕捉什么市场行为或交易逻辑。",
     "2. 表达式中每个组成部分分别是什么意思。",
-    "3. 为什么它可能在对应股票池里有效。",
-    "4. 从这些指标看，它的强项和弱点是什么。",
+    "3. 结合股票池、基准和评分时间段，说明为什么它可能有效。",
+    "4. 对比最新窗口评分和历史窗口评分，判断稳定性和是否可能过拟合。",
     "5. 可能失效的市场环境和主要风险。",
     "6. 下一步应该如何验证、改造或优化。",
     "",
@@ -263,8 +322,8 @@ function buildAskGptPrompt(row: FactorMiningCandidate): string {
   ].join("\n");
 }
 
-function openAskGpt(row: FactorMiningCandidate): void {
-  const url = `https://chat.openai.com/?hints=search&q=${encodeURIComponent(buildAskGptPrompt(row))}`;
+function openAskGpt(row: FactorMiningCandidate, run: FactorMiningRun | null): void {
+  const url = `https://chat.openai.com/?hints=search&q=${encodeURIComponent(buildAskGptPrompt(row, run))}`;
   const opened = window.open(url, "_blank", "noopener,noreferrer");
   if (opened) opened.opener = null;
 }
@@ -875,6 +934,10 @@ export default function FactorMiningDashboard() {
     }
   }, [scatterData, selectRow]);
 
+  const handleAskGpt = useCallback((row: FactorMiningCandidate) => {
+    openAskGpt(row, runDetail?.run ?? null);
+  }, [runDetail?.run]);
+
   const surface = isDark ? "border-gray-800 bg-gray-900" : "border-gray-200 bg-white";
   const muted = isDark ? "text-gray-400" : "text-gray-500";
   const primary = isDark ? "text-gray-100" : "text-gray-900";
@@ -1057,7 +1120,7 @@ export default function FactorMiningDashboard() {
                 rows={filteredRows}
                 selectedRowKey={selectedRow?.row_key ?? ""}
                 onSelect={(rowKey) => selectRow(rowKey, false)}
-                onAsk={openAskGpt}
+                onAsk={handleAskGpt}
                 isDark={isDark}
               />
             </>
@@ -1142,43 +1205,94 @@ function BacktestPanel({
           <div className={`flex h-full items-center justify-center text-sm ${muted}`}>暂无收益序列</div>
         )}
       </div>
-      {item?.status === "success" && item.daily.length > 0 ? (
+      {item?.status === "success" ? (
         <div className="px-4 pb-4">
-          <RecentDailyTable rows={item.daily.slice(-8).reverse()} isDark={isDark} />
+          <BacktestReturnTable item={item} granularity={granularity} isDark={isDark} />
         </div>
       ) : null}
     </section>
   );
 }
 
-function RecentDailyTable({ rows, isDark }: { rows: FactorMiningDailyReturn[]; isDark: boolean }) {
+function BacktestReturnTable({
+  item,
+  granularity,
+  isDark,
+}: {
+  item: FactorMiningBacktestItem;
+  granularity: ReturnGranularity;
+  isDark: boolean;
+}) {
   const muted = isDark ? "text-gray-400" : "text-gray-500";
+  const primary = isDark ? "text-gray-100" : "text-gray-900";
+  const border = isDark ? "border-gray-800" : "border-gray-200";
+  const headerBg = isDark ? "bg-gray-950 text-gray-400" : "bg-gray-50 text-gray-500";
+  const rows = granularity === "daily" ? item.daily : granularity === "monthly" ? item.monthly : item.yearly;
+  const title = granularity === "daily" ? "日累计明细" : granularity === "monthly" ? "月收益明细" : "年收益明细";
+
+  if (rows.length === 0) {
+    return (
+      <div className={`flex h-64 items-center justify-center rounded-lg border text-sm ${border} ${muted}`}>
+        暂无{title}
+      </div>
+    );
+  }
+
   return (
-    <div className={`overflow-auto rounded-lg border ${isDark ? "border-gray-800" : "border-gray-200"}`}>
-      <table className="w-full min-w-[760px] text-xs">
-        <thead className={isDark ? "bg-gray-950 text-gray-400" : "bg-gray-50 text-gray-500"}>
-          <tr>
-            <th className="px-3 py-2 text-left">日期</th>
-            <th className="px-3 py-2 text-right">策略当日</th>
-            <th className="px-3 py-2 text-right">基准当日</th>
-            <th className="px-3 py-2 text-right">策略累计</th>
-            <th className="px-3 py-2 text-right">基准累计</th>
-            <th className="px-3 py-2 text-right">累计超额</th>
-          </tr>
-        </thead>
-        <tbody className={isDark ? "divide-y divide-gray-800" : "divide-y divide-gray-100"}>
-          {rows.map((row) => (
-            <tr key={row.date}>
-              <td className={`px-3 py-2 font-mono ${muted}`}>{row.date}</td>
-              <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.strategy_return, isDark)}`}>{fmtPercent(row.strategy_return, 2)}</td>
-              <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.benchmark_return, isDark)}`}>{fmtPercent(row.benchmark_return, 2)}</td>
-              <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.strategy_cumulative, isDark)}`}>{fmtPercent(row.strategy_cumulative, 2)}</td>
-              <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.benchmark_cumulative, isDark)}`}>{fmtPercent(row.benchmark_cumulative, 2)}</td>
-              <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.excess_cumulative, isDark)}`}>{fmtPercent(row.excess_cumulative, 2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className={`rounded-lg border ${border}`}>
+      <div className={`flex items-center justify-between border-b px-3 py-2 ${border}`}>
+        <div className={`text-xs font-semibold ${primary}`}>{title}</div>
+        <div className={`text-xs ${muted}`}>共 {rows.length} 行</div>
+      </div>
+      <div className="h-64 overflow-auto">
+        {granularity === "daily" ? (
+          <table className="w-full min-w-[760px] text-xs">
+            <thead className={`sticky top-0 z-10 ${headerBg}`}>
+              <tr>
+                <th className="px-3 py-2 text-left">日期</th>
+                <th className="px-3 py-2 text-right">策略当日</th>
+                <th className="px-3 py-2 text-right">基准当日</th>
+                <th className="px-3 py-2 text-right">策略累计</th>
+                <th className="px-3 py-2 text-right">基准累计</th>
+                <th className="px-3 py-2 text-right">累计超额</th>
+              </tr>
+            </thead>
+            <tbody className={isDark ? "divide-y divide-gray-800" : "divide-y divide-gray-100"}>
+              {item.daily.map((row) => (
+                <tr key={row.date}>
+                  <td className={`px-3 py-2 font-mono ${muted}`}>{row.date}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.strategy_return, isDark)}`}>{fmtPercent(row.strategy_return, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.benchmark_return, isDark)}`}>{fmtPercent(row.benchmark_return, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.strategy_cumulative, isDark)}`}>{fmtPercent(row.strategy_cumulative, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.benchmark_cumulative, isDark)}`}>{fmtPercent(row.benchmark_cumulative, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.excess_cumulative, isDark)}`}>{fmtPercent(row.excess_cumulative, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <table className="w-full min-w-[620px] text-xs">
+            <thead className={`sticky top-0 z-10 ${headerBg}`}>
+              <tr>
+                <th className="px-3 py-2 text-left">周期</th>
+                <th className="px-3 py-2 text-right">策略收益</th>
+                <th className="px-3 py-2 text-right">基准收益</th>
+                <th className="px-3 py-2 text-right">超额收益</th>
+              </tr>
+            </thead>
+            <tbody className={isDark ? "divide-y divide-gray-800" : "divide-y divide-gray-100"}>
+              {(granularity === "monthly" ? item.monthly : item.yearly).map((row) => (
+                <tr key={row.period}>
+                  <td className={`px-3 py-2 font-mono ${muted}`}>{row.period}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.strategy_return, isDark)}`}>{fmtPercent(row.strategy_return, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.benchmark_return, isDark)}`}>{fmtPercent(row.benchmark_return, 2)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${valueColorClass(row.excess_return, isDark)}`}>{fmtPercent(row.excess_return, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -1277,9 +1391,9 @@ function DetailTable({
           toggleSort(sortKey);
         }
       }}
-      className={`group relative cursor-pointer px-3 py-2 select-none ${align === "right" ? "text-right" : "text-left"}`}
+      className={`group relative cursor-pointer whitespace-nowrap px-4 py-3 select-none ${align === "right" ? "text-right" : "text-left"}`}
     >
-      <span className={`inline-flex items-center gap-1 ${align === "right" ? "justify-end" : "justify-start"}`}>
+      <span className={`inline-flex items-center gap-1.5 ${align === "right" ? "justify-end" : "justify-start"}`}>
         {label}
         <span className="rounded-full border border-current px-1 text-[10px] leading-4 opacity-60">?</span>
         <span className="font-mono text-[10px] opacity-70">{sortIndicator(sortKey)}</span>
@@ -1295,8 +1409,28 @@ function DetailTable({
         <h3 className={`text-sm font-semibold ${primary}`}>完整明细</h3>
         <p className={`mt-1 text-xs ${muted}`}>点击行查看该因子的收益曲线。</p>
       </div>
-      <div className="max-h-[640px] overflow-auto">
-        <table className="w-full min-w-[1540px] text-sm">
+      <div className="max-h-[640px] overflow-auto overscroll-x-contain">
+        <table className="w-full min-w-[2840px] table-fixed text-sm">
+          <colgroup>
+            <col className="w-[112px]" />
+            <col className="w-[260px]" />
+            <col className="w-[640px]" />
+            <col className="w-[120px]" />
+            <col className="w-[132px]" />
+            <col className="w-[156px]" />
+            <col className="w-[156px]" />
+            <col className="w-[132px]" />
+            <col className="w-[132px]" />
+            <col className="w-[132px]" />
+            <col className="w-[140px]" />
+            <col className="w-[150px]" />
+            <col className="w-[176px]" />
+            <col className="w-[132px]" />
+            <col className="w-[132px]" />
+            <col className="w-[140px]" />
+            <col className="w-[112px]" />
+            <col className="w-[136px]" />
+          </colgroup>
           <thead className={isDark ? "bg-gray-950 text-gray-400" : "bg-gray-50 text-gray-500"}>
             <tr>
               <HeaderCell label="等级" sortKey="grade" align="left" />
@@ -1316,7 +1450,7 @@ function DetailTable({
               <HeaderCell label="CAGR" sortKey="cagr" align="right" />
               <HeaderCell label="MaxDD" sortKey="maxDrawdown" align="right" />
               <HeaderCell label="翻转" sortKey="flipped" align="right" />
-              <th className="px-3 py-2 text-right">操作</th>
+              <th className="whitespace-nowrap px-4 py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody className={isDark ? "divide-y divide-gray-800" : "divide-y divide-gray-100"}>
@@ -1326,28 +1460,28 @@ function DetailTable({
                 onClick={() => onSelect(row.row_key)}
                 className={`cursor-pointer ${selectedRowKey === row.row_key ? (isDark ? "bg-blue-500/10" : "bg-blue-50") : ""}`}
               >
-                <td className="px-3 py-3"><span className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-bold ${gradeClass(row.grade, isDark)}`}>{row.grade}</span></td>
-                <td className="px-3 py-3">
-                  <div className={`font-medium ${primary}`}>{row.name || row.row_key}</div>
+                <td className="px-4 py-3"><span className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-bold ${gradeClass(row.grade, isDark)}`}>{row.grade}</span></td>
+                <td className="px-4 py-3">
+                  <div className={`break-words font-medium ${primary}`}>{row.name || row.row_key}</div>
                 </td>
-                <td className={`px-3 py-3 max-w-[440px] whitespace-normal font-mono text-xs ${muted}`}>
+                <td className={`px-4 py-3 whitespace-normal break-words font-mono text-xs leading-relaxed ${muted}`}>
                   <div>{row.expression}</div>
                 </td>
-                <td className="px-3 py-3 text-right font-mono">{fmtNumber(row.holding_period, 0)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtNumber(row.score, 1)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtNumber(row.latest_score, 1)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtNumber(row.history_score, 1)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.ic_mean, isDark)}`}>{fmtNumber(row.latest.ic_mean, 4)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.ic_ir, isDark)}`}>{fmtNumber(row.latest.ic_ir, 3)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtPercent(row.latest.ic_win_rate, 1)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtNumber(row.latest.monotonicity, 2)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.sharpe ?? row.latest.strategy_sharpe, isDark)}`}>{fmtNumber(row.latest.sharpe ?? row.latest.strategy_sharpe, 3)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.long_short_sharpe, isDark)}`}>{fmtNumber(row.latest.long_short_sharpe, 3)}</td>
-                <td className="px-3 py-3 text-right font-mono">{fmtPercent(row.latest.turnover, 2)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.cagr, isDark)}`}>{fmtPercent(row.latest.cagr, 2)}</td>
-                <td className={`px-3 py-3 text-right font-mono ${valueColorClass(row.latest.max_drawdown, isDark)}`}>{fmtPercent(row.latest.max_drawdown, 2)}</td>
-                <td className="px-3 py-3 text-right">{row.latest.flipped === true ? "是" : "否"}</td>
-                <td className="px-3 py-3 text-right">
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtNumber(row.holding_period, 0)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtNumber(row.score, 1)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtNumber(row.latest_score, 1)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtNumber(row.history_score, 1)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.ic_mean, isDark)}`}>{fmtNumber(row.latest.ic_mean, 4)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.ic_ir, isDark)}`}>{fmtNumber(row.latest.ic_ir, 3)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtPercent(row.latest.ic_win_rate, 1)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtNumber(row.latest.monotonicity, 2)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.sharpe ?? row.latest.strategy_sharpe, isDark)}`}>{fmtNumber(row.latest.sharpe ?? row.latest.strategy_sharpe, 3)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.long_short_sharpe, isDark)}`}>{fmtNumber(row.latest.long_short_sharpe, 3)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono">{fmtPercent(row.latest.turnover, 2)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.cagr, isDark)}`}>{fmtPercent(row.latest.cagr, 2)}</td>
+                <td className={`whitespace-nowrap px-4 py-3 text-right font-mono ${valueColorClass(row.latest.max_drawdown, isDark)}`}>{fmtPercent(row.latest.max_drawdown, 2)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right">{row.latest.flipped === true ? "是" : "否"}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right">
                   <button
                     type="button"
                     onClick={(event) => {
