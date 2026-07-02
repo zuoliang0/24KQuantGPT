@@ -49,21 +49,36 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function McpGuideModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<"claude" | "openclaw">("claude");
+  const [tab, setTab] = useState<"claude" | "codex" | "openclaw">("claude");
   const { isDark } = useColorMode();
 
   const mcpConfig = `{
   "mcpServers": {
-    "quantgpt": {
+    "24kquantgpt": {
       "type": "stdio",
       "command": "python3",
       "args": ["-m", "quantgpt"],
       "env": {
-        "PYTHONPATH": "/path/to/QuantGPT"
+        "PYTHONPATH": "/path/to/24KQuantGPT"
       }
     }
   }
 }`;
+
+  const codexSetupCommand = `cd /path/to/24KQuantGPT
+python3.12 -m venv .venv
+./.venv/bin/pip install -e ".[dev,postgresql]"`;
+
+  const codexConfig = `[mcp_servers."24kquantgpt"]
+command = "/path/to/24KQuantGPT/.venv/bin/python"
+args = ["-m", "quantgpt"]
+
+[mcp_servers."24kquantgpt".env]
+PYTHONPATH = "/path/to/24KQuantGPT"`;
+
+  const codexPrompt = `请先调用 list_operators 和 list_universes。
+然后在 small_scale 上回测 rank(close / ts_mean(close, 20))，
+并用小白能理解的话解释 IC、换手率和分组收益。`;
 
   const openclawNativeCode = `from openclaw.tools.mcp import MCPClient
 
@@ -98,7 +113,7 @@ agent.register_tool(backtest_tool)`;
             </div>
             <div>
               <h2 className={`text-base font-semibold ${isDark ? "text-gray-100" : "text-gray-900"}`}>MCP 集成指南</h2>
-              <p className="text-xs text-gray-400">通过 MCP 协议接入 QuantGPT 回测能力</p>
+              <p className="text-xs text-gray-400">通过 MCP 协议接入 24KQuantGPT 回测能力</p>
             </div>
           </div>
           <button
@@ -109,35 +124,51 @@ agent.register_tool(backtest_tool)`;
           </button>
         </div>
 
-        <div className={`px-5 pt-3 flex gap-1 border-b ${isDark ? "border-gray-700" : "border-gray-100"}`}>
-          <button
-            onClick={() => setTab("claude")}
-            className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-              tab === "claude"
-                ? isDark
-                  ? "text-orange-400 border-b-2 border-orange-500 bg-orange-500/10"
-                  : "text-orange-600 border-b-2 border-orange-500 bg-orange-50/50"
-                : isDark
-                  ? "text-gray-400 hover:text-gray-300 hover:bg-gray-800"
-                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            Claude Code
-          </button>
-          <button
-            onClick={() => setTab("openclaw")}
-            className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-              tab === "openclaw"
-                ? isDark
-                  ? "text-amber-400 border-b-2 border-amber-500 bg-amber-500/10"
-                  : "text-blue-600 border-b-2 border-blue-500 bg-blue-50/50"
-                : isDark
-                  ? "text-gray-400 hover:text-gray-300 hover:bg-gray-800"
-                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            OpenClaw / Agent
-          </button>
+        <div className={`px-5 py-2 border-b ${isDark ? "border-gray-700" : "border-gray-100"}`}>
+          <div className={`inline-flex max-w-full gap-1 overflow-x-auto rounded-lg border p-1 ${isDark ? "border-gray-700 bg-gray-800" : "border-gray-200 bg-gray-50"}`}>
+            <button
+              onClick={() => setTab("claude")}
+              className={`shrink-0 rounded-md px-3 py-1.5 text-sm font-medium leading-5 transition-colors ${
+                tab === "claude"
+                  ? isDark
+                    ? "bg-gray-950 text-orange-300 shadow-sm"
+                    : "bg-white text-orange-700 shadow-sm"
+                  : isDark
+                    ? "text-gray-400 hover:text-gray-300 hover:bg-gray-800"
+                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              Claude Code
+            </button>
+            <button
+              onClick={() => setTab("codex")}
+              className={`shrink-0 rounded-md px-3 py-1.5 text-sm font-medium leading-5 transition-colors ${
+                tab === "codex"
+                  ? isDark
+                    ? "bg-gray-950 text-orange-300 shadow-sm"
+                    : "bg-white text-orange-700 shadow-sm"
+                  : isDark
+                    ? "text-gray-400 hover:text-gray-300 hover:bg-gray-800"
+                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              Codex
+            </button>
+            <button
+              onClick={() => setTab("openclaw")}
+              className={`shrink-0 rounded-md px-3 py-1.5 text-sm font-medium leading-5 transition-colors ${
+                tab === "openclaw"
+                  ? isDark
+                    ? "bg-gray-950 text-orange-300 shadow-sm"
+                    : "bg-white text-orange-700 shadow-sm"
+                  : isDark
+                    ? "text-gray-400 hover:text-gray-300 hover:bg-gray-800"
+                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              OpenClaw / Agent
+            </button>
+          </div>
         </div>
 
         <div className="overflow-y-auto px-5 py-4 space-y-5">
@@ -147,7 +178,7 @@ agent.register_tool(backtest_tool)`;
               <div className={`${isDark ? "bg-amber-500/10" : "bg-blue-50"} rounded-lg p-3.5`}>
                 <p className={`text-sm ${isDark ? "text-amber-300" : "text-blue-800"}`}>
                   <span className="font-medium">什么是 MCP？</span>{" "}
-                  MCP (Model Context Protocol) 让 Claude 直接调用 QuantGPT 的回测工具。
+                  MCP (Model Context Protocol) 让 Claude 直接调用 24KQuantGPT 的回测工具。
                   配置后，Claude 可以直接调用回测、评分、诊断等研究工具。
                 </p>
               </div>
@@ -159,8 +190,8 @@ agent.register_tool(backtest_tool)`;
                   <h3 className={`text-sm font-medium ${isDark ? "text-gray-100" : "text-gray-900"}`}>克隆项目并安装</h3>
                 </div>
                 <div className="relative bg-gray-900 rounded-lg p-3 font-mono text-xs text-gray-100 leading-relaxed">
-                  <CopyButton text={"git clone https://github.com/Miasyster/QuantGPT.git\ncd QuantGPT\npip install -e ."} />
-                  <pre className="whitespace-pre-wrap"><span className="text-green-400">$</span> git clone https://github.com/Miasyster/QuantGPT.git{"\n"}<span className="text-green-400">$</span> cd QuantGPT{"\n"}<span className="text-green-400">$</span> pip install -e .</pre>
+                  <CopyButton text={"git clone https://github.com/zuoliang0/24KQuantGPT.git\ncd 24KQuantGPT\npip install -e ."} />
+                  <pre className="whitespace-pre-wrap"><span className="text-green-400">$</span> git clone https://github.com/zuoliang0/24KQuantGPT.git{"\n"}<span className="text-green-400">$</span> cd 24KQuantGPT{"\n"}<span className="text-green-400">$</span> pip install -e .</pre>
                 </div>
               </div>
 
@@ -190,12 +221,66 @@ agent.register_tool(backtest_tool)`;
                   <CopyButton text="claude mcp list" />
                   <div>
                     <span className="text-green-400">$</span> claude mcp list<br/>
-                    <span className="text-gray-400"># quantgpt: Connected</span>
+                    <span className="text-gray-400"># 24kquantgpt: Connected</span>
                   </div>
                 </div>
                 <p className={`text-xs ${isDark ? "text-gray-400" : "text-gray-500"} mt-2`}>
                   验证连接后，Agent 可自主调用工具进行因子研究：回测、评分、诊断、反过拟合检测
                 </p>
+              </div>
+            </>
+          ) : tab === "codex" ? (
+            <>
+              <div className={`${isDark ? "bg-amber-500/10" : "bg-blue-50"} rounded-lg p-3.5`}>
+                <p className={`text-sm ${isDark ? "text-amber-300" : "text-blue-800"}`}>
+                  <span className="font-medium">Codex 怎么接？</span>{" "}
+                  Codex 可以把 24KQuantGPT 当作本地 MCP 工具使用。配置完成后，你可以直接让 Codex 调用回测、评分和诊断工具。
+                </p>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`h-5 w-5 rounded-full ${isDark ? "bg-gray-100" : "bg-gray-900"} ${isDark ? "text-gray-900" : "text-white"} text-xs flex items-center justify-center font-medium`}>1</span>
+                  <h3 className={`text-sm font-medium ${isDark ? "text-gray-100" : "text-gray-900"}`}>准备项目环境</h3>
+                </div>
+                <p className={`text-xs ${isDark ? "text-gray-400" : "text-gray-500"} mb-1.5`}>
+                  先确保本地虚拟环境已经装好依赖：
+                </p>
+                <div className="relative bg-gray-900 rounded-lg p-3 font-mono text-xs text-gray-100 leading-relaxed">
+                  <CopyButton text={codexSetupCommand} />
+                  <pre className="whitespace-pre-wrap">{codexSetupCommand}</pre>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`h-5 w-5 rounded-full ${isDark ? "bg-gray-100" : "bg-gray-900"} ${isDark ? "text-gray-900" : "text-white"} text-xs flex items-center justify-center font-medium`}>2</span>
+                  <h3 className={`text-sm font-medium ${isDark ? "text-gray-100" : "text-gray-900"}`}>配置 Codex</h3>
+                </div>
+                <p className={`text-xs ${isDark ? "text-gray-400" : "text-gray-500"} mb-1.5 font-medium`}>
+                  在 <code className={`${isDark ? "bg-gray-800" : "bg-gray-100"} px-1 rounded`}>~/.codex/config.toml</code> 里加入：
+                </p>
+                <div className="relative bg-gray-900 rounded-lg p-3 font-mono text-xs text-gray-100 leading-relaxed">
+                  <CopyButton text={codexConfig} />
+                  <pre className="whitespace-pre-wrap">{codexConfig}</pre>
+                </div>
+                <p className="text-xs text-gray-400 mt-1.5">
+                  将 <code className={`${isDark ? "bg-gray-800 text-gray-300" : "bg-gray-100 text-gray-600"} px-1 rounded`}>/path/to/24KQuantGPT</code> 替换为你本机项目路径。
+                </p>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`h-5 w-5 rounded-full ${isDark ? "bg-gray-100" : "bg-gray-900"} ${isDark ? "text-gray-900" : "text-white"} text-xs flex items-center justify-center font-medium`}>3</span>
+                  <h3 className={`text-sm font-medium ${isDark ? "text-gray-100" : "text-gray-900"}`}>在 Codex 里试跑</h3>
+                </div>
+                <p className={`text-xs ${isDark ? "text-gray-400" : "text-gray-500"} mb-1.5`}>
+                  保存配置后重启 Codex，打开一个新对话，输入：
+                </p>
+                <div className="relative bg-gray-900 rounded-lg p-3 font-mono text-xs text-gray-100 leading-relaxed">
+                  <CopyButton text={codexPrompt} />
+                  <pre className="whitespace-pre-wrap">{codexPrompt}</pre>
+                </div>
               </div>
             </>
           ) : (
@@ -204,8 +289,8 @@ agent.register_tool(backtest_tool)`;
               <div className={`${isDark ? "bg-amber-500/10" : "bg-blue-50"} rounded-lg p-3.5`}>
                 <p className={`text-sm ${isDark ? "text-amber-300" : "text-blue-800"}`}>
                   <span className="font-medium">架构说明</span>{" "}
-                  OpenClaw 是 Agent 调度框架，通过 MCP 协议动态调用 QuantGPT 的回测能力。
-                  QuantGPT 作为 MCP Server 暴露标准化工具接口。
+                  OpenClaw 是 Agent 调度框架，通过 MCP 协议动态调用 24KQuantGPT 的回测能力。
+                  24KQuantGPT 作为 MCP Server 暴露标准化工具接口。
                 </p>
               </div>
 
@@ -215,7 +300,7 @@ agent.register_tool(backtest_tool)`;
       ↓
 [MCP Client]
       ↓  Streamable HTTP
-[QuantGPT MCP Server (localhost:8002)]
+[24KQuantGPT MCP Server (localhost:8002)]
       ↓
 [回测 / 评分 / 诊断 / 验证]`}</pre>
               </div>
@@ -294,7 +379,7 @@ agent.register_tool(backtest_tool)`;
         {/* Footer */}
         <div className={`px-5 py-3 border-t ${isDark ? "border-gray-700" : "border-gray-100"} flex items-center justify-between`}>
           <a
-            href="https://github.com/Miasyster/QuantGPT"
+            href="https://github.com/zuoliang0/24KQuantGPT"
             target="_blank"
             rel="noopener noreferrer"
             className={`flex items-center gap-1.5 text-sm ${isDark ? "text-gray-400 hover:text-gray-300" : "text-gray-500 hover:text-gray-700"} transition-colors`}
@@ -355,7 +440,7 @@ export default function Header() {
             <BarChart3 className={`h-6 w-6 ${isDark ? "text-amber-400" : "text-blue-600"}`} />
             <div>
               <div className="flex items-center gap-2">
-                <h1 className={`text-lg font-semibold ${isDark ? "text-gray-100" : "text-gray-900"}`}>QuantGPT</h1>
+                <h1 className={`text-lg font-semibold ${isDark ? "text-gray-100" : "text-gray-900"}`}>24KQuantGPT</h1>
                 <button
                   onClick={() => setShowChangelog(true)}
                   className={`text-xs px-1.5 py-0.5 rounded ${isDark ? "bg-amber-500/10 text-amber-400 hover:bg-amber-500/20" : "bg-blue-50 text-blue-600 hover:bg-blue-100"} transition-colors font-mono`}

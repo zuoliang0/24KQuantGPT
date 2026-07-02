@@ -4,15 +4,17 @@ import logging
 import threading
 import time
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from sqlalchemy import desc, func, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_current_user
 from ..db import get_db
-from ..models import User
+from ..models import SubmittedAlpha, Task as TaskModel, User
 from ..task_store import (
     active_task_count,
     check_rate_limit,
@@ -32,6 +34,10 @@ router = APIRouter(prefix="/api/v1/wq-brain", tags=["wq_brain"])
 _safe_float = safe_float
 _fitness_to_grade = fitness_to_grade
 
+WQ_CANDIDATE_TASK_TYPES = {"wq_brain_submit", "wq_brain_batch"}
+WQ_SUBMIT_TASK_TYPES = {"wq_brain_submit_by_ids", "wq_brain_batch_submit_by_id", "wq_brain_finalize"}
+WQ_DEFAULT_TAG = "wq_round_YYYYMMDD_topic"
+
 
 class WQBrainSubmitRequest(BaseModel):
     expression: str = Field(..., description="FASTEXPR factor expression")
@@ -45,6 +51,153 @@ class WQBrainSubmitRequest(BaseModel):
     auto_submit: bool = Field(False, description="Auto-submit if checks pass")
     account: str = Field("primary", description="WQ account: 'primary' or 'alt'")
     session_id: str | None = Field(None, description="Session ID")
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _status_label(status: str | None) -> str:
+    labels = {
+        "completed": "已模拟",
+        "failed": "失败",
+        "pending": "等待中",
+        "running": "运行中",
+        "authenticating": "认证中",
+        "simulating": "模拟中",
+        "cancelled": "已取消",
+        "iteration_completed": "已完成",
+    }
+    return labels.get(status or "", status or "未知")
+
+
+def _candidate_decision(fitness: float | None, sharpe: float | None, turnover: float | None, status: str | None) -> str:
+    if status == "failed":
+        return "记录失败原因"
+    if fitness is not None and fitness >= 1.0:
+        if turnover is not None and (turnover < 0.01 or turnover > 0.7):
+            return "先复核换手"
+        return "待确认提交"
+    if fitness is not None and fitness >= 0.8 and sharpe is not None and sharpe >= 1.25:
+        return "接近门槛"
+    return "继续观察"
+
+
+def _extract_single_task_metrics(task: TaskModel) -> dict:
+    result = task.result if isinstance(task.result, dict) else {}
+    is_metrics = result.get("is_metrics") if isinstance(result.get("is_metrics"), dict) else {}
+    wq_brain = result.get("wq_brain") if isinstance(result.get("wq_brain"), dict) else {}
+    backtest_summary = result.get("backtest_summary") if isinstance(result.get("backtest_summary"), dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    settings = result.get("settings") if isinstance(result.get("settings"), dict) else {}
+    fitness = _safe_float(is_metrics.get("fitness") or wq_brain.get("wq_fitness") or backtest_summary.get("wq_fitness"))
+    sharpe = _safe_float(is_metrics.get("sharpe") or wq_brain.get("wq_sharpe") or backtest_summary.get("long_short_sharpe"))
+    returns = _safe_float(is_metrics.get("returns") or wq_brain.get("wq_returns"))
+    turnover = _safe_float(is_metrics.get("turnover") or wq_brain.get("wq_turnover") or backtest_summary.get("turnover"))
+    alpha_id = result.get("alpha_id")
+    expression = task.expression or result.get("expression") or params.get("expression") or ""
+    return {
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "status": task.status,
+        "status_label": _status_label(task.status),
+        "decision": _candidate_decision(fitness, sharpe, turnover, task.status),
+        "expression": expression,
+        "alpha_id": alpha_id,
+        "tag": params.get("tag"),
+        "region": settings.get("region") or params.get("region") or "USA",
+        "universe": settings.get("universe") or params.get("universe") or "TOP3000",
+        "delay": settings.get("delay") if settings.get("delay") is not None else params.get("delay"),
+        "decay": settings.get("decay") if settings.get("decay") is not None else params.get("decay"),
+        "neutralization": settings.get("neutralization") or params.get("neutralization") or "SUBINDUSTRY",
+        "truncation": settings.get("truncation") if settings.get("truncation") is not None else params.get("truncation"),
+        "fitness": fitness,
+        "sharpe": sharpe,
+        "returns": returns,
+        "turnover": turnover,
+        "submitted": result.get("submitted") is True,
+        "error": task.error or result.get("error"),
+        "created_at": _isoformat(task.created_at),
+        "updated_at": _isoformat(task.updated_at),
+    }
+
+
+def _extract_batch_task_candidates(task: TaskModel) -> list[dict]:
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    expression = task.expression or result.get("expression") or params.get("expression") or ""
+    sub_results = result.get("sub_results") if isinstance(result.get("sub_results"), dict) else {}
+    if not sub_results:
+        return [_extract_single_task_metrics(task)]
+
+    candidates = []
+    for key, item in sub_results.items():
+        if not isinstance(item, dict):
+            continue
+        fitness = _safe_float(item.get("fitness"))
+        sharpe = _safe_float(item.get("sharpe"))
+        turnover = _safe_float(item.get("turnover"))
+        status = "completed" if item.get("status") == "completed" else "failed"
+        candidates.append({
+            "task_id": task.id,
+            "task_type": task.task_type,
+            "combo_key": key,
+            "status": status,
+            "status_label": _status_label(status),
+            "decision": _candidate_decision(fitness, sharpe, turnover, status),
+            "expression": expression,
+            "alpha_id": item.get("alpha_id"),
+            "tag": params.get("tag"),
+            "region": item.get("region") or params.get("region") or "USA",
+            "universe": item.get("universe") or params.get("universe") or "TOP3000",
+            "delay": item.get("delay") if item.get("delay") is not None else params.get("delay"),
+            "decay": params.get("decay"),
+            "neutralization": item.get("neutralization") or params.get("neutralization") or "SUBINDUSTRY",
+            "truncation": params.get("truncation"),
+            "fitness": fitness,
+            "sharpe": sharpe,
+            "returns": _safe_float(item.get("returns")),
+            "turnover": turnover,
+            "submitted": item.get("submitted") is True,
+            "error": item.get("error"),
+            "created_at": _isoformat(task.created_at),
+            "updated_at": _isoformat(task.updated_at),
+        })
+    return candidates
+
+
+def _submitted_alpha_row(alpha: SubmittedAlpha) -> dict:
+    return {
+        "alpha_id": alpha.alpha_id,
+        "expression": alpha.expression,
+        "tag": alpha.tag,
+        "region": alpha.region,
+        "universe": alpha.universe,
+        "delay": alpha.delay,
+        "decay": alpha.decay,
+        "neutralization": alpha.neutralization,
+        "truncation": alpha.truncation,
+        "fitness": alpha.fitness,
+        "sharpe": alpha.sharpe,
+        "returns": alpha.returns,
+        "turnover": alpha.turnover,
+        "status": alpha.status,
+        "status_label": _status_label(alpha.status),
+        "submitted_at": _isoformat(alpha.submitted_at),
+    }
+
+
+def _candidate_sort_key(candidate: dict) -> tuple[int, float, float, float, str]:
+    decision_rank = 0 if candidate.get("decision") == "待确认提交" else 1
+    return (
+        decision_rank,
+        -float(candidate.get("fitness") or -999.0),
+        -float(candidate.get("sharpe") or -999.0),
+        float(candidate.get("turnover") or 999.0),
+        str(candidate.get("created_at") or ""),
+    )
 
 
 def _run_wq_brain_task(task_id: str, req: WQBrainSubmitRequest, user_id: str):
@@ -109,6 +262,87 @@ async def wq_brain_status():
         "configured": len(accounts) > 0,
         "accounts": accounts,
         "thresholds": SUBMIT_THRESHOLDS,
+    }
+
+
+@router.get("/research-board", summary="WQ 候选与提交状态")
+async def wq_research_board(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    limit: int = 200,
+):
+    """返回 WQ 优先挖掘看板数据。"""
+    bounded_limit = min(max(limit, 1), 500)
+    task_result = await session.execute(
+        sa_select(TaskModel)
+        .where(TaskModel.user_id == user.id, TaskModel.task_type.in_(WQ_CANDIDATE_TASK_TYPES | WQ_SUBMIT_TASK_TYPES))
+        .order_by(desc(TaskModel.created_at))
+        .limit(bounded_limit)
+    )
+    task_rows = task_result.scalars().all()
+
+    candidates: list[dict] = []
+    submit_tasks: list[dict] = []
+    for task in task_rows:
+        if task.task_type in WQ_SUBMIT_TASK_TYPES:
+            submit_tasks.append({
+                "task_id": task.id,
+                "task_type": task.task_type,
+                "status": task.status,
+                "status_label": _status_label(task.status),
+                "params": task.params if isinstance(task.params, dict) else {},
+                "result": task.result if isinstance(task.result, dict) else {},
+                "error": task.error,
+                "created_at": _isoformat(task.created_at),
+                "updated_at": _isoformat(task.updated_at),
+            })
+            continue
+        if task.task_type == "wq_brain_batch":
+            candidates.extend(_extract_batch_task_candidates(task))
+        else:
+            candidates.append(_extract_single_task_metrics(task))
+
+    submitted_result = await session.execute(
+        sa_select(SubmittedAlpha)
+        .where(SubmittedAlpha.user_id == user.id)
+        .order_by(desc(SubmittedAlpha.submitted_at))
+        .limit(bounded_limit)
+    )
+    submitted_alphas = [_submitted_alpha_row(row) for row in submitted_result.scalars().all()]
+    submitted_ids = {row["alpha_id"] for row in submitted_alphas if row.get("alpha_id")}
+
+    for candidate in candidates:
+        alpha_id = candidate.get("alpha_id")
+        if alpha_id and alpha_id in submitted_ids:
+            candidate["decision"] = "已提交跟踪"
+
+    candidates.sort(key=_candidate_sort_key)
+    configured = configured_accounts()
+    summary = {
+        "candidate_count": len(candidates),
+        "ready_to_submit": sum(1 for item in candidates if item.get("decision") == "待确认提交"),
+        "near_ready": sum(1 for item in candidates if item.get("decision") == "接近门槛"),
+        "submitted_count": len(submitted_alphas),
+        "active_count": sum(1 for item in submitted_alphas if str(item.get("status") or "").lower() == "active"),
+        "failed_count": sum(1 for item in candidates if item.get("status") == "failed"),
+    }
+
+    return {
+        "configured": len(configured) > 0,
+        "accounts": configured,
+        "default_policy": {
+            "region": "USA",
+            "universe": "TOP3000",
+            "delay": 1,
+            "neutralization": "SUBINDUSTRY",
+            "auto_submit": False,
+            "tag_format": WQ_DEFAULT_TAG,
+        },
+        "thresholds": SUBMIT_THRESHOLDS,
+        "summary": summary,
+        "candidates": candidates,
+        "submitted_alphas": submitted_alphas,
+        "submit_tasks": submit_tasks,
     }
 
 

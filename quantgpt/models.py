@@ -205,3 +205,113 @@ class ApiKey(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     user = relationship("User")
+
+
+class FactorMiningRun(Base):
+    __tablename__ = "factor_mining_runs"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_tag = Column(String(120), nullable=False)
+    status = Column(String(20), default="pending", nullable=False)
+    params = Column(JSON, nullable=True)
+    source_summary = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    generated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class FactorMiningCandidate(Base):
+    __tablename__ = "factor_mining_candidates"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id = Column(Uuid, ForeignKey("factor_mining_runs.id"), nullable=False, index=True)
+    row_key = Column(String(200), nullable=False)
+    source_id = Column(String(80), nullable=False)
+    source_label = Column(String(160), nullable=False)
+    row_index = Column(Integer, nullable=False, default=0)
+    name = Column(String(200), nullable=False)
+    expression = Column(Text, nullable=False)
+    holding_period = Column(Integer, nullable=False)
+    n_groups = Column(Integer, nullable=False, default=5)
+    cost_rate = Column(Float, nullable=False, default=0.003)
+    neutralize_industry = Column(Boolean, nullable=False, default=True)
+    neutralize_cap = Column(Boolean, nullable=False, default=True)
+    status = Column(String(20), default="success", nullable=False)
+    score = Column(Float, nullable=True)
+    grade = Column(String(2), nullable=True)
+    latest_score = Column(Float, nullable=True)
+    history_score = Column(Float, nullable=True)
+    latest_ic_mean = Column(Float, nullable=True)
+    latest_ic_ir = Column(Float, nullable=True)
+    latest_ic_win_rate = Column(Float, nullable=True)
+    latest_monotonicity = Column(Float, nullable=True)
+    latest_sharpe = Column(Float, nullable=True)
+    latest_top_group_sharpe = Column(Float, nullable=True)
+    latest_long_short_sharpe = Column(Float, nullable=True)
+    latest_turnover = Column(Float, nullable=True)
+    latest_cagr = Column(Float, nullable=True)
+    latest_max_drawdown = Column(Float, nullable=True)
+    latest_strategy_max_drawdown = Column(Float, nullable=True)
+    latest_total_return = Column(Float, nullable=True)
+    latest_benchmark_total_return = Column(Float, nullable=True)
+    latest_excess_total_return = Column(Float, nullable=True)
+    latest_flipped = Column(Boolean, nullable=True)
+    history_score_raw = Column(Float, nullable=True)
+    history_ic_mean = Column(Float, nullable=True)
+    history_ic_ir = Column(Float, nullable=True)
+    history_ic_win_rate = Column(Float, nullable=True)
+    history_monotonicity = Column(Float, nullable=True)
+    history_sharpe = Column(Float, nullable=True)
+    history_top_group_sharpe = Column(Float, nullable=True)
+    history_long_short_sharpe = Column(Float, nullable=True)
+    history_turnover = Column(Float, nullable=True)
+    history_cagr = Column(Float, nullable=True)
+    history_max_drawdown = Column(Float, nullable=True)
+    history_strategy_max_drawdown = Column(Float, nullable=True)
+    history_total_return = Column(Float, nullable=True)
+    history_benchmark_total_return = Column(Float, nullable=True)
+    history_excess_total_return = Column(Float, nullable=True)
+    history_flipped = Column(Boolean, nullable=True)
+    stability_score = Column(Float, nullable=True)
+    market_fit = Column(Text, nullable=True)
+    failure_modes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("uq_factor_mining_candidates_run_row_key", "run_id", "row_key", unique=True),
+    )
+
+    run = relationship("FactorMiningRun")
+
+
+class FactorMiningBacktestSeries(Base):
+    __tablename__ = "factor_mining_backtest_series"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id = Column(Uuid, ForeignKey("factor_mining_runs.id"), nullable=False, index=True)
+    candidate_id = Column(Uuid, ForeignKey("factor_mining_candidates.id"), nullable=False, index=True)
+    row_key = Column(String(200), nullable=False)
+    source_id = Column(String(80), nullable=False)
+    source_label = Column(String(160), nullable=False)
+    row_index = Column(Integer, nullable=False, default=0)
+    name = Column(String(200), nullable=False)
+    expression = Column(Text, nullable=False)
+    holding_period = Column(Integer, nullable=False)
+    status = Column(String(20), default="success", nullable=False)
+    error_message = Column(Text, nullable=True)
+    metrics = Column(JSON, nullable=True)
+    daily = Column(JSON, nullable=True)
+    monthly = Column(JSON, nullable=True)
+    yearly = Column(JSON, nullable=True)
+    generated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("uq_factor_mining_backtest_series_run_row_key", "run_id", "row_key", unique=True),
+    )
+
+    run = relationship("FactorMiningRun")
+    candidate = relationship("FactorMiningCandidate")

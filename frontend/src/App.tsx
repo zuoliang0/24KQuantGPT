@@ -12,6 +12,7 @@ import IterationPanel from "./components/IterationPanel";
 import CompositeBuilder from "./components/CompositeBuilder";
 import FactorComparison from "./components/FactorComparison";
 import ResearchDashboard from "./components/ResearchDashboard";
+import FactorMiningDashboard from "./components/FactorMiningDashboard";
 import TabNavigation, { TABS } from "./components/TabNavigation";
 import type { MainTab } from "./components/TabNavigation";
 import AppSidebar from "./components/AppSidebar";
@@ -185,6 +186,10 @@ export default function App() {
         <main className={`min-w-0 space-y-4 ${activeTab === "backtest" ? "flex-1" : "w-full"}`}>
           {activeTab === "dashboard" && (
             <ResearchDashboard />
+          )}
+
+          {activeTab === "factor-mining" && (
+            <FactorMiningDashboard />
           )}
 
           {activeTab === "backtest" && (

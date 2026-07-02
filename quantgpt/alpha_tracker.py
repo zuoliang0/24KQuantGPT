@@ -46,24 +46,46 @@ async def record_submitted_alpha(
 
     async with factory() as session:
         try:
-            record = SubmittedAlpha(
-                user_id=uid,
-                alpha_id=alpha_id,
-                expression=expression,
-                expression_normalized=normalized,
-                region=region,
-                universe=universe,
-                delay=delay,
-                decay=decay,
-                neutralization=neutralization,
-                truncation=truncation,
-                sharpe=sharpe,
-                fitness=fitness,
-                returns=returns,
-                turnover=turnover,
-                tag=tag,
+            result = await session.execute(
+                select(SubmittedAlpha).where(
+                    SubmittedAlpha.user_id == uid,
+                    SubmittedAlpha.alpha_id == alpha_id,
+                )
             )
-            session.add(record)
+            record = result.scalar_one_or_none()
+            if record is None:
+                record = SubmittedAlpha(
+                    user_id=uid,
+                    alpha_id=alpha_id,
+                    expression=expression,
+                    expression_normalized=normalized,
+                    region=region,
+                    universe=universe,
+                    delay=delay,
+                    decay=decay,
+                    neutralization=neutralization,
+                    truncation=truncation,
+                    sharpe=sharpe,
+                    fitness=fitness,
+                    returns=returns,
+                    turnover=turnover,
+                    tag=tag,
+                )
+                session.add(record)
+            else:
+                record.expression = expression
+                record.expression_normalized = normalized
+                record.region = region
+                record.universe = universe
+                record.delay = delay
+                record.decay = decay
+                record.neutralization = neutralization
+                record.truncation = truncation
+                record.sharpe = sharpe
+                record.fitness = fitness
+                record.returns = returns
+                record.turnover = turnover
+                record.tag = tag
             await session.commit()
             logger.info(f"Recorded submitted alpha: {alpha_id}")
         except Exception as e:

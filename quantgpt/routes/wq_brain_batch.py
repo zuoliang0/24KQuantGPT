@@ -74,6 +74,49 @@ class BatchFinalizeRequest(BaseModel):
 _safe_float = safe_float
 
 
+def _alpha_expression(alpha_data: dict) -> str:
+    regular = alpha_data.get("regular")
+    if isinstance(regular, dict):
+        return str(regular.get("code") or "")
+    if isinstance(regular, str):
+        return regular
+    return str(alpha_data.get("code") or "")
+
+
+def _record_alpha_submission_result(client, user_id: str, alpha_id: str, entry: dict):
+    from ..alpha_tracker import record_submitted_alpha_sync, update_submitted_alpha_status_sync
+
+    alpha_data = client._fetch_alpha(alpha_id)
+    if not alpha_data:
+        raise RuntimeError(f"无法读取已提交 alpha 详情: alpha_id={alpha_id}")
+
+    settings = alpha_data.get("settings") if isinstance(alpha_data.get("settings"), dict) else {}
+    is_data = alpha_data.get("is") if isinstance(alpha_data.get("is"), dict) else {}
+    expression = _alpha_expression(alpha_data)
+    if not expression:
+        raise RuntimeError(f"已提交 alpha 缺少表达式: alpha_id={alpha_id}")
+
+    record_submitted_alpha_sync(
+        user_id=user_id,
+        alpha_id=alpha_id,
+        expression=expression,
+        region=str(settings.get("region") or "USA"),
+        universe=str(settings.get("universe") or "TOP3000"),
+        delay=int(settings.get("delay") if settings.get("delay") is not None else 1),
+        decay=int(settings.get("decay") if settings.get("decay") is not None else 0),
+        neutralization=str(settings.get("neutralization") or "SUBINDUSTRY"),
+        truncation=float(settings.get("truncation") if settings.get("truncation") is not None else 0.08),
+        sharpe=_safe_float(is_data.get("sharpe")),
+        fitness=_safe_float(is_data.get("fitness")),
+        returns=_safe_float(is_data.get("returns")),
+        turnover=_safe_float(is_data.get("turnover")),
+        tag=None,
+    )
+    final_status = str(entry.get("final_status") or "").lower()
+    if final_status:
+        update_submitted_alpha_status_sync(alpha_id, final_status)
+
+
 def _classify_alpha_check(data: dict) -> dict:
     """Classify a check_alpha_status() result into a final status."""
     if not data.get("ok"):
@@ -294,6 +337,12 @@ def _run_batch_submit_by_id(task_id: str, alpha_ids: list[str], account: str, us
 
         def on_each_done(aid, entry):
             task.setdefault("sub_results", {})[aid] = entry
+            if entry.get("final_status") in ("ACTIVE", "SC_FAIL", "SC_PENDING"):
+                try:
+                    _record_alpha_submission_result(client, user_id, aid, entry)
+                except Exception as e:
+                    entry["record_error"] = str(e)
+                    logger.warning(f"[{task_id}] submitted alpha record error: {e}")
             try:
                 persist_task_to_db(task_id, user_id, task)
             except Exception as e:

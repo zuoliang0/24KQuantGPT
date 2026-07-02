@@ -167,6 +167,7 @@ from .routes.comparison import router as comparison_router
 from .routes.composite import router as composite_router
 from .routes.daily_summary import router as daily_summary_router
 from .routes.factor_library import router as factor_library_router
+from .routes.factor_mining import router as factor_mining_router
 from .routes.feedback import router as feedback_router
 from .routes.iteration_routes import router as iteration_router
 from .routes.sessions import router as sessions_router
@@ -181,6 +182,7 @@ app.include_router(factor_library_router)
 app.include_router(composite_router)
 app.include_router(comparison_router)
 app.include_router(daily_summary_router)
+app.include_router(factor_mining_router)
 app.include_router(backtest_tasks_router)
 app.include_router(iteration_router)
 app.include_router(feedback_router)

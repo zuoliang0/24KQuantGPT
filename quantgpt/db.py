@@ -67,6 +67,10 @@ def _migrate_add_columns(connection):
         connection, inspector, "submitted_alphas", "tag",
         "ALTER TABLE submitted_alphas ADD COLUMN tag VARCHAR(100)",
     )
+    _add_column_if_missing(
+        connection, inspector, "factor_mining_candidates", "history_score_raw",
+        "ALTER TABLE factor_mining_candidates ADD COLUMN history_score_raw FLOAT",
+    )
 
 
 def _add_column_if_missing(connection, inspector, table, column, ddl):
@@ -85,3 +89,10 @@ async def close_db():
         await _engine.dispose()
         _engine = None
         _session_factory = None
+
+
+def reset_db_state() -> None:
+    """Forget the current async engine when switching event-loop ownership."""
+    global _engine, _session_factory
+    _engine = None
+    _session_factory = None

@@ -27,7 +27,7 @@ export default function CloudValidationCard({ result, cloudUrl }: Props) {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium" style={{ color: isDark ? "#e5e7eb" : "#374151" }}>
-            QuantGPT Cloud 独立验证
+            24KQuantGPT Cloud 独立验证
           </span>
           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
             isActive
